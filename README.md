@@ -14,3 +14,6 @@ asterisk -rx "pjsip show contacts"
 
 4 - Consultar um endpoint específico
 asterisk -rx "pjsip show endpoint 1001"
+
+5 - Consultar registro no provedor
+asterisk -rx "pjsip show registrations"
