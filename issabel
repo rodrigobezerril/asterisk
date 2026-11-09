@@ -1,0 +1,17 @@
+#Configuração de ramais
+Aplicações -> Ramais
+
+#Grupos de ramais
+Aplicações -> Grupos de extensões
+
+#Rotas de entrada
+Conectividade -> Rotas de entrada
+
+#Rotas de saída
+Conectividade -> Rotas de saída
+
+#Configuração do tronco SIP
+Conectividade -> Tronco -> Adicionar um tronco SIP
+
+#Classe de serviço (Políticas para permitir ou negar ligações)
+Conectividade -> Classe de Serviço
