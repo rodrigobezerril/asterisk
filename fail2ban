@@ -1,0 +1,322 @@
+# Issabel / Asterisk — Diagnóstico de falha de registro SIP causada pelo Fail2ban
+
+## 1. Objetivo
+
+Documentar o diagnóstico e a resolução de uma falha de registro SIP de um telefone IP Htek UC902G em um servidor Issabel com Asterisk e PJSIP.
+
+O problema foi causado pelo bloqueio automático do endereço IP do telefone pelo Fail2ban, após sucessivas tentativas de autenticação SIP inválidas.
+
+## 2. Ambiente utilizado
+
+| Componente | Informação |
+|---|---|
+| PBX | Issabel 4 |
+| Servidor VoIP | Asterisk 18.19.0 |
+| Protocolo SIP | PJSIP |
+| Transporte | UDP |
+| Porta SIP | 5060 |
+| Telefone IP | Htek UC902G |
+| IP original do telefone | 10.4.46.8 |
+| IP alternativo utilizado no teste | 10.4.46.12 |
+| Ramais utilizados | 1001, 1002, 1003, 1004 |
+| Ramal adicional testado | 4401 |
+
+## 3. Sintoma apresentado
+
+O telefone Htek UC902G deixou de registrar no servidor Issabel.
+
+Inicialmente, foram investigadas possíveis causas relacionadas a:
+
+- Configuração do ramal SIP.
+- Usuário e senha de autenticação.
+- Porta UDP 5060.
+- Comunicação entre o telefone e o servidor.
+- Configuração do PJSIP.
+- Firewall e mecanismos de proteção do servidor.
+
+Durante os testes, o endereço IP do telefone foi alterado de `10.4.46.8` para `10.4.46.12`. Após essa alteração, o registro voltou a funcionar.
+
+Entretanto, a mudança de IP apenas contornou o problema. Era necessário identificar a causa do bloqueio.
+
+## 4. Investigação técnica
+
+### 4.1. Verificação da porta SIP
+
+Foi utilizado:
+
+```bash
+ss -lunp | grep 5060
+```
+
+Resultado:
+
+```text
+UNCONN 0 0 0.0.0.0:5060 0.0.0.0:* users:(("asterisk",pid=1454,fd=17))
+```
+
+Interpretação:
+
+- `UNCONN`: socket UDP aguardando datagramas.
+- `0.0.0.0:5060`: Asterisk escutando na porta 5060 em todas as interfaces IPv4.
+- `asterisk`: processo responsável pelo socket.
+
+Isso confirmou que o Asterisk estava escutando na porta SIP esperada.
+
+### 4.2. Verificação do PJSIP
+
+Comando:
+
+```bash
+asterisk -rx "pjsip show settings"
+```
+
+Foi identificado o parâmetro:
+
+```text
+endpoint_identifier_order : ip,username,anonymous
+```
+
+Esse parâmetro define a ordem dos métodos utilizados pelo PJSIP para identificar o endpoint associado a uma requisição SIP.
+
+A ordem configurada era:
+
+1. IP.
+2. Nome de usuário.
+3. Identificação anônima.
+
+Essa configuração não indicava, por si só, a existência de um bloqueio do telefone.
+
+### 4.3. Verificação do PacketBL
+
+Foi identificado que o PacketBL estava associado a uma regra NFQUEUE do firewall.
+
+Comando:
+
+```bash
+cat /etc/packetbl/packetbl.conf
+```
+
+A configuração continha:
+
+```text
+whitelist 10.0.0.0/8
+```
+
+Também foram consultados os registros:
+
+```bash
+grep -i packetbl /var/log/messages | tail -30
+```
+
+Os registros mostraram que os endereços `10.4.46.8` e `10.4.46.12` eram aceitos pela whitelist.
+
+Portanto, não havia evidência de que o PacketBL estivesse bloqueando o telefone.
+
+### 4.4. Identificação do Fail2ban
+
+Foi realizada uma consulta ao Fail2ban:
+
+```bash
+fail2ban-client status asterisk-udp
+```
+
+O resultado informou que a jail não existia.
+
+Em seguida:
+
+```bash
+fail2ban-client status
+```
+
+Foram identificadas 15 jails ativas, incluindo:
+
+```text
+asterisk
+asterisk-ami
+```
+
+A jail correta para a investigação era `asterisk`.
+
+Consulta:
+
+```bash
+fail2ban-client status asterisk
+```
+
+Resultado relevante:
+
+```text
+Status for the jail: asterisk
+|- Filter
+|  |- Currently failed: 0
+|  |- Total failed:     6
+|  `- File list:        /var/log/asterisk/messages
+`- Actions
+   |- Currently banned: 1
+   |- Total banned:     1
+   `- Banned IP list:   10.4.46.8
+```
+
+**Descoberta:** o endereço IP `10.4.46.8` estava bloqueado pelo Fail2ban na jail `asterisk`.
+
+## 5. Identificação da causa raiz
+
+Para descobrir o motivo do bloqueio, foi consultado o histórico do Fail2ban:
+
+```bash
+grep '10.4.46.8' /var/log/fail2ban.log | tail -20
+```
+
+Resultado:
+
+```text
+2026-11-09 11:34:01,916 fail2ban.filter [734]: INFO [asterisk] Found 10.4.46.8
+2026-11-09 11:34:02,074 fail2ban.actions [734]: NOTICE [asterisk] Ban 10.4.46.8
+```
+
+O registro mostrou que o bloqueio ocorreu às 11:34:02.
+
+Para identificar o evento que provocou o bloqueio, foi necessário consultar o log do Asterisk.
+
+Inicialmente, o comando abaixo não apresentou o resultado esperado:
+
+```bash
+grep '10.4.46.8' /var/log/asterisk/messages
+```
+
+O sistema identificou o arquivo como binário.
+
+A solução foi utilizar a opção `-a`, que força o tratamento do arquivo como texto:
+
+```bash
+grep -a -n -B 5 -A 5 '10.4.46.8' /var/log/asterisk/messages | tail -60
+```
+
+Foram encontradas as seguintes mensagens:
+
+```text
+[2026-11-09 11:34:01] SECURITY res_security_log.c:
+SecurityEvent="ChallengeSent"
+AccountID="4401"
+RemoteAddress="IPV4/UDP/10.4.46.8/5060"
+
+[2026-11-09 11:34:01] NOTICE res_pjsip/pjsip_distributor.c:
+Request 'REGISTER' from '<sip:4401@10.5.4.1>'
+failed for '10.4.46.8:5060' - Failed to authenticate
+
+[2026-11-09 11:34:01] SECURITY res_security_log.c:
+SecurityEvent="ChallengeResponseFailed"
+AccountID="4401"
+Severity="Error"
+```
+
+As mensagens demonstraram que o telefone estava tentando registrar o ramal `4401`, mas a autenticação estava falhando.
+
+O evento `ChallengeSent` representa o envio do desafio de autenticação SIP pelo servidor.
+
+O evento `ChallengeResponseFailed` indica que a resposta enviada pelo cliente não correspondeu à resposta esperada pelo servidor.
+
+Após várias tentativas inválidas, o Fail2ban identificou o comportamento como suspeito e bloqueou o IP de origem.
+
+## 6. Conceitos importantes
+
+### 6.1. O que é Fail2ban?
+
+O Fail2ban é uma ferramenta de proteção que monitora arquivos de log em busca de comportamentos considerados suspeitos.
+
+Quando identifica um número configurado de falhas dentro de determinado intervalo, pode executar uma ação de bloqueio, normalmente por meio de regras de firewall.
+
+No ambiente Issabel, a jail `asterisk` monitora eventos relacionados à segurança do Asterisk.
+
+### 6.2. O que é uma jail?
+
+Uma jail é uma configuração do Fail2ban que reúne:
+
+- Um filtro responsável por identificar eventos nos logs.
+- Um arquivo ou conjunto de arquivos monitorados.
+- Limites de tentativas e intervalos de tempo.
+- Uma ação executada quando o limite é atingido.
+
+Exemplo:
+
+```bash
+fail2ban-client status asterisk
+```
+
+Consulta o estado da jail chamada `asterisk`.
+
+### 6.3. O que é autenticação SIP?
+
+O registro SIP permite que um telefone IP informe ao servidor VoIP que está disponível para receber chamadas.
+
+No processo de autenticação, o servidor normalmente utiliza um mecanismo de desafio e resposta.
+
+Fluxo simplificado:
+
+1. Telefone envia REGISTER.
+2. Asterisk responde com `401 Unauthorized`, contendo um desafio de autenticação.
+3. Telefone envia outro REGISTER com os dados de autenticação.
+4. Asterisk valida a resposta.
+5. Se os dados estiverem corretos, responde com `200 OK`.
+6. Se estiverem incorretos, a autenticação falha.
+
+O código `401 Unauthorized` inicial não representa necessariamente um erro: faz parte do processo normal de autenticação SIP Digest.
+
+### 6.4. Por que o IP foi bloqueado?
+
+O telefone realizou várias tentativas de autenticação utilizando o ramal `4401`, mas as respostas de autenticação não correspondiam às esperadas pelo Asterisk.
+
+O Fail2ban identificou as falhas consecutivas e bloqueou o endereço IP `10.4.46.8`.
+
+Isso explica por que o telefone deixou de registrar mesmo quando a configuração de rede e a porta SIP estavam aparentemente corretas.
+
+## 7. Resolução do problema
+
+Após identificar a causa, foi executado o comando:
+
+```bash
+fail2ban-client set asterisk unbanip 10.4.46.8
+```
+
+Esse comando remove o endereço IP informado da lista de bloqueio da jail `asterisk`.
+
+A proteção do Fail2ban permaneceu ativa.
+
+Depois da remoção do bloqueio, foi possível recuperar a comunicação utilizando o IP original do telefone e as credenciais corretas.
+
+## 8. Comandos úteis para futuras investigações
+
+| Objetivo | Comando |
+|---|---|
+| Verificar jails existentes | `fail2ban-client status` |
+| Consultar uma jail | `fail2ban-client status asterisk` |
+| Remover bloqueio de IP | `fail2ban-client set asterisk unbanip IP` |
+| Consultar eventos do Fail2ban | `grep 'IP' /var/log/fail2ban.log` |
+| Consultar logs do Asterisk | `grep -a 'IP' /var/log/asterisk/messages` |
+| Consultar porta UDP 5060 | `ss -lunp \| grep 5060` |
+| Consultar configurações PJSIP | `asterisk -rx "pjsip show settings"` |
+| Consultar contatos registrados | `asterisk -rx "pjsip show contacts"` |
+| Ativar log SIP em tempo real | `asterisk -rvvv` e depois `pjsip set logger on` |
+
+## 9. Aprendizados
+
+Com esse incidente, foram consolidados os seguintes conhecimentos:
+
+- Diagnóstico de registro SIP utilizando PJSIP.
+- Interpretação de mensagens de autenticação SIP.
+- Diferença entre falha de comunicação e falha de autenticação.
+- Verificação de sockets UDP no Linux.
+- Identificação de mecanismos de proteção do Issabel.
+- Funcionamento de jails do Fail2ban.
+- Análise de logs do Asterisk e Fail2ban.
+- Relação entre falhas de autenticação e bloqueios automáticos por firewall.
+
+## 10. Conclusão
+
+A falha de registro do telefone Htek UC902G não estava relacionada à indisponibilidade do serviço SIP, à porta UDP 5060 ou a uma configuração incorreta de roteamento.
+
+A causa raiz foi a autenticação inválida do ramal `4401`, que provocou o bloqueio automático do endereço IP `10.4.46.8` pelo Fail2ban.
+
+A solução consistiu em identificar a origem das falhas, remover o bloqueio específico e utilizar as credenciais corretas.
+
+**Principal aprendizado:** antes de alterar configurações de rede ou reiniciar serviços, é importante correlacionar os logs do Asterisk com os mecanismos de segurança do sistema. Isso permite identificar se o problema está na comunicação, na autenticação ou em uma política de bloqueio.
