@@ -1,1 +1,13 @@
+#Verificar ramais
+asterisk -rx "pjsip show endpoints"
 
+#Verificar se tronco está registrado
+asterisk -rx "pjsip show registrations"
+
+
+
+#Verificar IPs banidos
+ fail2ban-client status asterisk
+
+#Retirar ip banido
+fail2ban-client set asterisk unbanip 10.4.46.8
